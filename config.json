@@ -1,10 +1,10 @@
 {
-    "LocalPath": "/Users/bparli/tmp",
+    "LocalPath": "/tmp/s3proxy",
     "TotalFiles": "30",
-    "MemCap": "3G",
+    "MemCap": "1G",
     "MaxMemFileSize": "300M",
-    "DiskCap": "10G",
+    "DiskCap": "1G",
     "Cluster": "True",
-    "LocalName": "10.20.20.119:9081",
-    "Peers": ["172.16.46.180:9081"]
+    "LocalName": "127.0.0.1:9081",
+    "Peers": ["127.0.0.1:9081"]
 }

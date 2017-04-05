@@ -8,12 +8,15 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
-	"s3envoy/hashes"
-	"s3envoy/loadArgs"
-	"s3envoy/queues"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/bparli/s3envoy/hashes"
+	"github.com/bparli/s3envoy/loadArgs"
+	"github.com/bparli/s3envoy/queues"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
@@ -47,15 +50,15 @@ func CheckFileInPeerNode(fkey string, bucketName string, args *loadArgs.Args) (b
 	return false, ""
 }
 
-func s3Download(bucketName string, dirPath string, fname string, args *loadArgs.Args) (file *os.File, numBytes int64, Apperr *AppError) {
+func s3Download(bucketName string, fname string, args *loadArgs.Args) (file *os.File, numBytes int64, Apperr *AppError) {
 
-	localPath := args.LocalPath + bucketName + "/" + dirPath
+	localPath := args.LocalPath + bucketName + "/" + filepath.Dir(fname)
 	err := os.MkdirAll(localPath, 0755)
 	if err != nil {
 		log.Errorln(err, "Could not create local Directories")
 		return nil, 0, &AppError{err, "Could not create local Directories", 500}
 	}
-	file, err = os.Create(localPath + fname)
+	file, err = os.Create(localPath + filepath.Base(fname))
 	if err != nil {
 		log.Errorln(err, "Could not create local File")
 		return nil, 0, &AppError{err, "Could not create local File", 500}
@@ -64,7 +67,7 @@ func s3Download(bucketName string, dirPath string, fname string, args *loadArgs.
 	numBytes, err = downloader.Download(file,
 		&s3.GetObjectInput{
 			Bucket: aws.String(bucketName),
-			Key:    aws.String(dirPath + fname),
+			Key:    aws.String(fname),
 		})
 	if err != nil {
 		log.Errorln(err)
@@ -102,61 +105,73 @@ func s3Upload(bucketName string, fkey string, localFname string, numBytes int64)
 	return nil
 }
 
-func s3Get(w http.ResponseWriter, r *http.Request, fname string, bucketName string, dirPath string, args *loadArgs.Args) *AppError {
+func s3Get(w http.ResponseWriter, r *http.Request, fname string, bucketName string, args *loadArgs.Args) *AppError {
 	mutex.Lock()
-	node, avail := lru.Retrieve(dirPath+fname, bucketName)
+	node, avail := lru.Retrieve(fname, bucketName)
 	mutex.Unlock()
 
-	if avail == false {
+	log.Debugln("Request for ", fname, bucketName)
+
+	if !avail {
 		log.Debugln("File not in local FS")
 
 		//if in cluster mode, check if file is in Global Hash table
-		var check bool
+		var inGlobalHash bool
 		var res string
 		if args.Cluster == true {
-			check, res = CheckFileInPeerNode(dirPath+fname, bucketName, args)
+			inGlobalHash, res = CheckFileInPeerNode(fname, bucketName, args)
 		}
 
-		if check == false {
-			log.Debugln("File not in local FS or Global Hash, download from S3")
-			file, numBytes, errD := s3Download(bucketName, dirPath, fname, args)
-			defer file.Close()
-			if errD != nil {
-				return errD
-			}
-			//if small enough then add to memory and disk.
-			if numBytes < args.MaxMemFileSize {
-				d, errR := ioutil.ReadAll(file)
-				if errR != nil {
-					return &AppError{errR, "Could read from file", 500}
-				}
-				mutex.Lock()
-				lru.Add(bucketName, dirPath+fname, numBytes, true, d)
-				mutex.Unlock()
-			} else { //Otherwise just add to disk
-				mutex.Lock()
-				lru.Add(bucketName, dirPath+fname, numBytes, false, nil)
-				mutex.Unlock()
-			}
-			http.ServeFile(w, r, args.LocalPath+bucketName+"/"+dirPath+fname)
-		} else { //if in Global Hash then redirt to that host
+		//if in Global Hash then redirt to that host
+		if inGlobalHash {
 			log.Debugln("File in Global Hash, Redirect client to Peer", res)
 			//NOT cool, need to fix this
 			newAddr := strings.Split(res, ":")[0]
-			http.Redirect(w, r, "http://"+newAddr+":"+args.ClientPort+"/"+bucketName+"/"+dirPath+fname, 307)
+			http.Redirect(w, r, "http://"+newAddr+":"+args.ClientPort+"/"+bucketName+"/"+fname, 307)
+			return nil
 		}
 
-	} else {
-		log.Debugln("File IS in local FS")
-		if node.Inmem == true {
-			mutex.RLock()
-			http.ServeContent(w, r, node.Fkey, node.ModTime, node.MemFile)
-			mutex.RUnlock()
-		} else {
-			http.ServeFile(w, r, args.LocalPath+bucketName+"/"+dirPath+fname)
+		log.Debugln("File not in local FS or Global Hash, download from S3")
+		file, numBytes, err := s3Download(bucketName, fname, args)
+		defer file.Close()
+		if err != nil {
+			return err
 		}
+
+		//if small enough then add to memory and disk.
+		if numBytes < args.MaxMemFileSize {
+			d, err := ioutil.ReadAll(file)
+			if err != nil {
+				return &AppError{err, "Could read from file", 500}
+			}
+			mutex.Lock()
+			lru.Add(bucketName, fname, numBytes, true, d)
+			mutex.Unlock()
+
+			// TODO this should be the real mtime, not Now()
+			http.ServeContent(w, r, fname, time.Now().UTC(), file)
+			return nil
+		}
+
+		//Otherwise just add to disk
+		mutex.Lock()
+		lru.Add(bucketName, fname, numBytes, false, nil)
+		mutex.Unlock()
+		http.ServeFile(w, r, args.LocalPath+bucketName+"/"+fname)
 	}
-	log.Debugln("Request for ", dirPath+fname, bucketName)
+
+	log.Debugln("File IS in local FS")
+
+	if node.Inmem {
+		mutex.RLock()
+		http.ServeContent(w, r, node.Fkey, node.ModTime, node.MemFile)
+		mutex.RUnlock()
+		return nil
+	}
+
+	http.ServeFile(w, r, args.LocalPath+bucketName+"/"+fname)
+
+	log.Debugln("Request for ", fname, bucketName)
 	return nil
 }
 
@@ -165,10 +180,10 @@ func s3GetHandler(w http.ResponseWriter, r *http.Request, args *loadArgs.Args) *
 	vars := mux.Vars(r)
 	fname := vars["fname"]
 	bucket := vars["bucket"]
-	splits := strings.SplitN(bucket, "/", 2)
-	bucketName := splits[0]
-	dirPath := splits[1]
-	err := s3Get(w, r, fname, bucketName, dirPath, args)
+
+	log.Debugf("Got request for fname:%s, bucket:%s", fname, bucket)
+
+	err := s3Get(w, r, fname, bucket, args)
 	if err != nil {
 		http.Error(w, err.Message, 500)
 	}
@@ -299,11 +314,10 @@ func main() {
 
 	//use mux router and handler functions with the args struct being passed in
 	router := mux.NewRouter() //.StrictSlash(true)
-	router.HandleFunc("/{bucket:[a-zA-Z0-9-\\.\\/]*\\/}{fname:[a-zA-Z0-9-_\\.]*$}", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/{bucket}/{fname:.*$}", func(w http.ResponseWriter, r *http.Request) {
 		s3PutHandler(w, r, args)
 	}).Methods("PUT", "POST")
-	router.HandleFunc("/{bucket:[a-zA-Z0-9-\\.\\/]*[\\/]+}{fname:[a-zA-Z0-9-_\\.]*$}", func(w http.ResponseWriter, r *http.Request) {
-		//router.HandleFunc("/{bucket:[a-zA-Z0-9-\\.\\/]*[\\/]+}{fname:[.]*$}", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/{bucket}/{fname:.*$}", func(w http.ResponseWriter, r *http.Request) {
 		s3GetHandler(w, r, args)
 	}).Methods("GET")
 

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"s3envoy/loadArgs"
+	"github.com/bparli/s3envoy/loadArgs"
 	"sync"
 
 	log "github.com/Sirupsen/logrus"

@@ -8,7 +8,7 @@ import (
 
 	"github.com/Nitro/memberlist"
 	log "github.com/Sirupsen/logrus"
-	"github.com/pivotal-golang/bytefmt"
+	"code.cloudfoundry.org/bytefmt"
 )
 
 //Args struct to read config file and set global vars

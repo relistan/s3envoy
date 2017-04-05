@@ -2,8 +2,8 @@ package queues
 
 import (
 	"os"
-	"s3envoy/hashes"
-	"s3envoy/loadArgs"
+	"github.com/bparli/s3envoy/hashes"
+	"github.com/bparli/s3envoy/loadArgs"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
